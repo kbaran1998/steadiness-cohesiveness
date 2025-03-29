@@ -1,12 +1,11 @@
-from abc import ABC, abstractmethod
-from . import snn_knn as sk
-from sklearn.cluster import KMeans
-from pyclustering.cluster.xmeans import xmeans
-
-import numpy as np
 import hdbscan
-from . import distance_matrix as dm
+import numpy as np
+import scipy.sparse as sp
+from pyclustering.cluster.xmeans import xmeans
+from sklearn.cluster import KMeans
 
+from . import distance_matrix as dm
+from . import snn_knn as sk
 
 '''
 Helper functions for generating basic infos
@@ -96,17 +95,22 @@ def get_inject_snn_infos(raw, emb, dist_parameter, dist_function, length, k, snn
     infos["raw_knn"] = snn_knn_matrix["raw_knn"]
     infos["emb_knn"] = snn_knn_matrix["emb_knn"]
 
-    infos["raw_snn_matrix"] = snn_knn_matrix["raw_snn"]
-    infos["emb_snn_matrix"] = snn_knn_matrix["emb_snn"]
+    # Convert to sparse format
+    raw_snn = sp.csr_matrix(snn_knn_matrix["raw_snn"], dtype=np.float32)
+    emb_snn = sp.csr_matrix(snn_knn_matrix["emb_snn"], dtype=np.float32)
 
-    raw_snn_max		= np.max(infos["raw_snn_matrix"])
-    emb_snn_max		= np.max(infos["emb_snn_matrix"])
+    raw_snn_max = raw_snn.max()
+    emb_snn_max = emb_snn.max()
 
-    infos["raw_snn_matrix"] = infos["raw_snn_matrix"] / raw_snn_max
-    infos["emb_snn_matrix"] = infos["emb_snn_matrix"] / emb_snn_max
+    raw_snn_norm = raw_snn / raw_snn_max
+    emb_snn_norm = emb_snn / emb_snn_max
 
-    infos["raw_dist_matrix"] = 1 / (infos["raw_snn_matrix"] + dist_parameter["alpha"])
-    infos["emb_dist_matrix"] = 1 / (infos["emb_snn_matrix"] + dist_parameter["alpha"])
+    infos["raw_snn_matrix"] = raw_snn_norm
+    infos["emb_snn_matrix"] = emb_snn_norm
+
+    # Compute distance matrix only for non-zero entries
+    infos["raw_dist_matrix"] = 1.0 / (raw_snn_norm + dist_parameter["alpha"])
+    infos["emb_dist_matrix"] = 1.0 / (emb_snn_norm + dist_parameter["alpha"])
 
     return infos
 

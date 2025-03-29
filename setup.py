@@ -23,6 +23,7 @@ setuptools.setup(
 		"numba",
 		"pyclustering",
 		"hdbscan",
+		"scipy",
 	],
 	package_dir={"": "src"},
 	packages=setuptools.find_packages(where="src"),
