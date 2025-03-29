@@ -96,21 +96,30 @@ def get_inject_snn_infos(raw, emb, dist_parameter, dist_function, length, k, snn
     infos["emb_knn"] = snn_knn_matrix["emb_knn"]
 
     # Convert to sparse format
-    raw_snn = sp.csr_matrix(snn_knn_matrix["raw_snn"], dtype=np.float32)
-    emb_snn = sp.csr_matrix(snn_knn_matrix["emb_snn"], dtype=np.float32)
+    raw_snn_sparse = sp.csr_matrix(snn_knn_matrix["raw_snn"], dtype=np.float32)
+    emb_snn_sparse = sp.csr_matrix(snn_knn_matrix["emb_snn"], dtype=np.float32)
 
-    raw_snn_max = raw_snn.max()
-    emb_snn_max = emb_snn.max()
+    raw_snn_max = raw_snn_sparse.max()
+    emb_snn_max = emb_snn_sparse.max()
 
-    raw_snn_norm = raw_snn / raw_snn_max
-    emb_snn_norm = emb_snn / emb_snn_max
+    # Normalize (still sparse)
+    raw_snn_norm = raw_snn_sparse / raw_snn_max
+    emb_snn_norm = emb_snn_sparse / emb_snn_max
 
     infos["raw_snn_matrix"] = raw_snn_norm
     infos["emb_snn_matrix"] = emb_snn_norm
 
-    # Compute distance matrix only for non-zero entries
-    infos["raw_dist_matrix"] = 1.0 / (raw_snn_norm + dist_parameter["alpha"])
-    infos["emb_dist_matrix"] = 1.0 / (emb_snn_norm + dist_parameter["alpha"])
+    # Distance for non-zero entries
+    raw_dist_sparse = raw_snn_norm.copy()
+    emb_dist_sparse = emb_snn_norm.copy()
+
+    raw_dist_sparse.data = 1.0 / (raw_dist_sparse.data + dist_parameter["alpha"])
+    emb_dist_sparse.data = 1.0 / (emb_dist_sparse.data + dist_parameter["alpha"])
+
+    # Keep them sparse, but record the "default" distance for zero entries
+    infos["raw_dist_matrix"] = raw_dist_sparse
+    infos["emb_dist_matrix"] = emb_dist_sparse
+    infos["default_distance"] = 1.0 / dist_parameter["alpha"]  # what to assume where matrix is zero
 
     return infos
 
@@ -177,15 +186,32 @@ Helper functions to compute the distances between clusters
 
 def get_snn_cluster_distance(cluster_a, cluster_b, raw, emb, infos, dist_parameter):
     pair_num = cluster_a.size * cluster_b.size
-    if cluster_a.size == 1:
-        cluster_a = cluster_a[0]
-    if cluster_b.size == 1:
-        cluster_b = cluster_b[0]
-    raw_sim = np.sum(((infos["raw_snn_matrix"][cluster_a]).T)[cluster_b]) / pair_num
-    emb_sim = np.sum(((infos["emb_snn_matrix"][cluster_a]).T)[cluster_b]) / pair_num
 
-    raw_dist = 1 / (raw_sim + dist_parameter["alpha"])
-    emb_dist = 1 / (emb_sim + dist_parameter["alpha"])
+    # Ensure 1D arrays
+    if cluster_a.size == 1:
+        cluster_a = np.array([cluster_a[0]])
+    if cluster_b.size == 1:
+        cluster_b = np.array([cluster_b[0]])
+
+    def compute_avg_similarity(matrix):
+        if sp.issparse(matrix):
+            # Sparse path
+            total = 0.0
+            for i in cluster_a:
+                row = matrix.getrow(i)
+                for j in cluster_b:
+                    total += row[0, j]  # missing values are zero
+            return total / pair_num
+        else:
+            # Dense path
+            return np.sum(matrix[np.ix_(cluster_a, cluster_b)]) / pair_num
+
+    raw_sim = compute_avg_similarity(infos["raw_snn_matrix"])
+    emb_sim = compute_avg_similarity(infos["emb_snn_matrix"])
+
+    # Convert to distances
+    raw_dist = 1.0 / (raw_sim + dist_parameter["alpha"])
+    emb_dist = 1.0 / (emb_sim + dist_parameter["alpha"])
 
     return raw_dist, emb_dist
 
@@ -207,14 +233,34 @@ def euc_get_centroid(cluster, raw, emb):
         emb_centroid = np.sum(emb[cluster], axis=0) / len(cluster)
     return raw_centroid, emb_centroid
 
+def compute_avg_dist(matrix, default_val, cluster_a, cluster_b, pair_num):
+    if sp.issparse(matrix):
+        # Sparse path — compute manually
+        total = 0.0
+        for i in cluster_a:
+            row = matrix.getrow(i)
+            for j in cluster_b:
+                val = row[0, j]
+                if val == 0:
+                    val = default_val
+                total += val
+        return total / pair_num
+
+    return np.sum(matrix[np.ix_(cluster_a, cluster_b)]) / pair_num
+
 def get_predefined_cluster_distance(cluster_a, cluster_b, raw, emb, infos, dist_parameter):
     pair_num = cluster_a.size * cluster_b.size
+
+    # Ensure scalar indexing doesn't mess up shapes
     if cluster_a.size == 1:
-        cluster_a = cluster_a[0]
+        cluster_a = np.array([cluster_a[0]])
     if cluster_b.size == 1:
-        cluster_b = cluster_b[0]
-    raw_dist = np.sum((infos["raw_dist_matrix"][cluster_a].T)[cluster_b]) / pair_num
-    emb_dist = np.sum((infos["emb_dist_matrix"][cluster_a].T)[cluster_b]) / pair_num
+        cluster_b = np.array([cluster_b[0]])
+
+
+    default_val = infos.get("default_distance", 1.0 / dist_parameter["alpha"])
+    raw_dist = compute_avg_dist(infos["raw_dist_matrix"], default_val, cluster_a, cluster_b, pair_num)
+    emb_dist = compute_avg_dist(infos["emb_dist_matrix"], default_val, cluster_a, cluster_b, pair_num)
 
     return raw_dist, emb_dist
 
@@ -268,6 +314,31 @@ def install_hparam(dist_strategy, dist_parameter, dist_function, cluster_strateg
     )
 
 
+def compute_dissim_extrema_sparse(raw_dist, emb_dist, default_val):
+    # Step 1: align the matrices
+    raw_dist = raw_dist.tocoo()
+    emb_dist = emb_dist.tocoo()
+
+    # Combine all non-zero indices
+    raw_zip = set(zip(raw_dist.row, raw_dist.col))
+    emb_zip = set(zip(emb_dist.row, emb_dist.col))
+    coords = raw_zip | emb_zip
+
+    # Compute dissimilarities at those positions
+    sparse_min = float("inf")
+    sparse_max = float("-inf")
+
+    for i, j in coords:
+        raw_val = raw_dist[i, j] if raw_dist[i, j] != 0 else default_val
+        emb_val = emb_dist[i, j] if emb_dist[i, j] != 0 else default_val
+        diff = raw_val - emb_val
+        sparse_min = min(sparse_min, diff)
+        sparse_max = max(sparse_max, diff)
+
+    return sparse_min, sparse_max
+
+
+
 class HparamFunctions():
     '''
     Saving raw, emb info and setting parameter
@@ -290,10 +361,18 @@ class HparamFunctions():
 
     def preprocessing(self):
         self.infos = self.get_infos(self.raw, self.emb, self.dist_parameter, self.dist_function, self.length, self.k, self.snn_knn_matrix)
-        dissim_matrix = self.infos["raw_dist_matrix"] - self.infos["emb_dist_matrix"]
 
-        dissim_max = np.max(dissim_matrix)
-        dissim_min = np.min(dissim_matrix)
+        if isinstance(self.infos["raw_dist_matrix"], sp.csr_matrix):
+            dissim_min, dissim_max = compute_dissim_extrema_sparse(
+                self.infos["raw_dist_matrix"],
+                self.infos["emb_dist_matrix"],
+                self.infos["default_distance"]
+            )
+        else:
+            # Compute dissimilarities for dense matrices
+            dissim_matrix = self.infos["raw_dist_matrix"] - self.infos["emb_dist_matrix"]
+            dissim_max = np.max(dissim_matrix)
+            dissim_min = np.min(dissim_matrix)
 
         max_compress = dissim_max if dissim_max > 0 else 0
         min_compress = dissim_min if dissim_min > 0 else 0
