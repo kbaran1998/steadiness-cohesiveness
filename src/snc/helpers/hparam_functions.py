@@ -109,17 +109,18 @@ def get_inject_snn_infos(raw, emb, dist_parameter, dist_function, length, k, snn
     infos["raw_snn_matrix"] = raw_snn_norm
     infos["emb_snn_matrix"] = emb_snn_norm
 
-    # Distance for non-zero entries
+    # Distance for non-zero entries only (safe sparse handling)
     raw_dist_sparse = raw_snn_norm.copy()
     emb_dist_sparse = emb_snn_norm.copy()
 
     raw_dist_sparse.data = 1.0 / (raw_dist_sparse.data + dist_parameter["alpha"])
     emb_dist_sparse.data = 1.0 / (emb_dist_sparse.data + dist_parameter["alpha"])
 
-    # Keep them sparse, but record the "default" distance for zero entries
     infos["raw_dist_matrix"] = raw_dist_sparse
     infos["emb_dist_matrix"] = emb_dist_sparse
-    infos["default_distance"] = 1.0 / dist_parameter["alpha"]  # what to assume where matrix is zero
+
+    # Default distance to assume at zero positions
+    infos["default_distance"] = 1.0 / dist_parameter["alpha"]
 
     return infos
 
@@ -315,25 +316,33 @@ def install_hparam(dist_strategy, dist_parameter, dist_function, cluster_strateg
 
 
 def compute_dissim_extrema_sparse(raw_dist, emb_dist, default_val):
-    # Step 1: align the matrices
-    raw_dist = raw_dist.tocoo()
-    emb_dist = emb_dist.tocoo()
+    # Ensure CSR for subscriptability
+    raw_dist_csr = raw_dist.tocsr()
+    emb_dist_csr = emb_dist.tocsr()
 
-    # Combine all non-zero indices
-    raw_zip = set(zip(raw_dist.row, raw_dist.col))
-    emb_zip = set(zip(emb_dist.row, emb_dist.col))
-    coords = raw_zip | emb_zip
+    # Get all unique non-zero positions
+    raw_coords = set(zip(*raw_dist_csr.nonzero()))
+    emb_coords = set(zip(*emb_dist_csr.nonzero()))
+    coords = raw_coords | emb_coords  # union of positions with any data
 
-    # Compute dissimilarities at those positions
     sparse_min = float("inf")
     sparse_max = float("-inf")
 
     for i, j in coords:
-        raw_val = raw_dist[i, j] if raw_dist[i, j] != 0 else default_val
-        emb_val = emb_dist[i, j] if emb_dist[i, j] != 0 else default_val
+        raw_val = raw_dist_csr[i, j] if raw_dist_csr[i, j] != 0 else default_val
+        emb_val = emb_dist_csr[i, j] if emb_dist_csr[i, j] != 0 else default_val
         diff = raw_val - emb_val
         sparse_min = min(sparse_min, diff)
         sparse_max = max(sparse_max, diff)
+
+    # Account for untouched entries
+    total_entries = raw_dist.shape[0] * raw_dist.shape[1]
+    untouched_entries = total_entries - len(coords)
+    default_diff = default_val - default_val  # usually 0
+
+    if untouched_entries > 0:
+        sparse_min = min(sparse_min, default_diff)
+        sparse_max = max(sparse_max, default_diff)
 
     return sparse_min, sparse_max
 
