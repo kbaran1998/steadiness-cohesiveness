@@ -148,18 +148,31 @@ def get_a_cluster_naive(infos, mode, seed_idx, walk_num):
     return sk.naive_cluster_extraction(knn_info, seed_idx, walk_num)
 
 
+
+def safe_fill_diagonal(matrix, value):
+    if isinstance(matrix, np.ndarray):
+        np.fill_diagonal(matrix, value)
+    elif sp.issparse(matrix):
+        # Convert to lil_matrix for efficient item assignment
+        matrix = matrix.tolil(copy=False)
+        matrix.setdiag(value)
+        matrix = matrix.tocsr()  # Or return to original format if needed
+    else:
+        raise TypeError("Matrix must be a numpy array or scipy sparse matrix")
+    return matrix
+
 '''
 Helper functions for cluster the given indices
 '''
-
 def get_clustering_dbscan(dist_matrix, data, indices, dist_parameter):
-    cluster_dist_matrix = (dist_matrix[indices].T)[indices]
-    np.fill_diagonal(cluster_dist_matrix, 0)
+    cluster_dist_matrix = dist_matrix[np.ix_(indices, indices)]
+    cluster_dist_matrix = safe_fill_diagonal(cluster_dist_matrix, 0)
 
     clusterer = hdbscan.HDBSCAN(metric="precomputed", allow_single_cluster=True)
     clusterer.fit(cluster_dist_matrix)
 
     return clusterer.labels_
+
 
 def get_clustering_xmeans(dist_matrix, data, indices, dist_parameter):
     clusterer = xmeans(data[indices])
