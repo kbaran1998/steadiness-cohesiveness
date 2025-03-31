@@ -3,7 +3,6 @@ import numpy as np
 import scipy.sparse as sp
 from pyclustering.cluster.xmeans import xmeans
 from sklearn.cluster import KMeans
-
 from . import distance_matrix as dm
 from . import snn_knn as sk
 
@@ -60,8 +59,6 @@ def get_predefined_infos(raw, emb, dist_parameter, dist_function, length, k, snn
         "raw_knn"         : raw_knn_info,
         "emb_knn"         : emb_knn_info
     }
-
-
 
 
 def get_snn_infos(raw, emb, dist_parameter, dist_function, length, k, snn_knn_matrix):
@@ -165,11 +162,14 @@ def safe_fill_diagonal(matrix, value):
 Helper functions for cluster the given indices
 '''
 def get_clustering_dbscan(dist_matrix, data, indices, dist_parameter):
+    max_dist = 1.0 / dist_parameter["alpha"]
     cluster_dist_matrix = dist_matrix[np.ix_(indices, indices)]
-    cluster_dist_matrix = safe_fill_diagonal(cluster_dist_matrix, 0)
+    cluster_dist_np_arr = cluster_dist_matrix.toarray() + max_dist
+    cluster_dist_np_arr = safe_fill_diagonal(cluster_dist_np_arr, 0)
+
 
     clusterer = hdbscan.HDBSCAN(metric="precomputed", allow_single_cluster=True)
-    clusterer.fit(cluster_dist_matrix)
+    clusterer.fit(cluster_dist_np_arr)
 
     return clusterer.labels_
 
